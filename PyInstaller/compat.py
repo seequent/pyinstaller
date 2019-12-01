@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -13,6 +13,7 @@ Various classes and functions to provide some backwards-compatibility
 with previous versions of Python from 2.7 onward.
 """
 
+from __future__ import print_function
 
 import io
 import os
@@ -20,22 +21,24 @@ import platform
 import site
 import subprocess
 import sys
-
-from .log import logger
+import errno
+from .exceptions import ExecCommandFailed
 
 # Distinguish code for different major Python version.
 is_py2 = sys.version_info[0] == 2
 is_py3 = sys.version_info[0] == 3
+# Copied from https://docs.python.org/3/library/platform.html#cross-platform.
+is_64bits = sys.maxsize > 2**32
 # Distinguish specific code for various Python versions.
 is_py27 = sys.version_info >= (2, 7) and sys.version_info < (3, 0)
-# PyInstaller supports only Python 3.3+
+# PyInstaller supports only Python 3.4+
 # Variables 'is_pyXY' mean that Python X.Y and up is supported.
-is_py34 = sys.version_info >= (3, 4)
 is_py35 = sys.version_info >= (3, 5)
 is_py36 = sys.version_info >= (3, 6)
 is_py37 = sys.version_info >= (3, 7)
 
 is_win = sys.platform.startswith('win')
+is_win_10 = is_win and (platform.win32_ver()[0] == '10')
 is_cygwin = sys.platform == 'cygwin'
 is_darwin = sys.platform == 'darwin'  # Mac OS X
 
@@ -55,14 +58,12 @@ is_unix = is_linux or is_solar or is_aix or is_freebsd or is_hpux
 
 # On different platforms is different file for dynamic python library.
 _pyver = sys.version_info[:2]
-if is_win:
+if is_win or is_cygwin:
     PYDYLIB_NAMES = {'python%d%d.dll' % _pyver,
-                     'libpython%d.%d.dll' % _pyver}  # For MSYS2 environment
-elif is_cygwin:
-    PYDYLIB_NAMES = {'libpython%d%d.dll' % _pyver,
+                     'libpython%d%d.dll' % _pyver,
                      'libpython%d%dm.dll' % _pyver,
                      'libpython%d.%d.dll' % _pyver,
-                     'libpython%d.%dm.dll' % _pyver}
+                     'libpython%d.%dm.dll' % _pyver}  # For MSYS2 environment
 elif is_darwin:
     # libpython%d.%dm.dylib for Conda virtual environment installations
     PYDYLIB_NAMES = {'Python', '.Python',
@@ -86,7 +87,8 @@ elif is_unix:
     # Python 3 .so library on Linux is: libpython3.2mu.so.1.0, libpython3.3m.so.1.0
     PYDYLIB_NAMES = {'libpython%d.%d.so.1.0' % _pyver,
                      'libpython%d.%dm.so.1.0' % _pyver,
-                     'libpython%d.%dmu.so.1.0' % _pyver}
+                     'libpython%d.%dmu.so.1.0' % _pyver,
+                     'libpython%d.%dm.so' % _pyver}
 else:
     raise SystemExit('Your platform is not yet supported. '
                      'Please define constant PYDYLIB_NAMES for your platform.')
@@ -97,6 +99,38 @@ else:
 # module as io.open(). The Python 2 open() built-in is commonly regarded as
 # unsafe in regards to character encodings and hence inferior to io.open().
 open_file = open if is_py3 else io.open
+text_read_mode = 'r' if is_py3 else 'rU'
+
+
+# These are copied from ``six``.
+#
+# Type for representing (Unicode) textual data.
+text_type = unicode if is_py2 else str
+# Type for representing binary data.
+binary_type = str if is_py2 else bytes
+
+
+# This class converts all writes to unicode first. For use with
+# ``print(*args, file=f)``, since in Python 2 this ``print`` will write str, not
+# unicode.
+class unicode_writer:
+
+    # Store the object to proxy.
+    def __init__(self, f):
+        self.f = f
+
+    # Insist that writes use the ``text_type``.
+    def write(self, _str):
+        self.f.write(text_type(_str))
+
+    def writelines(self, lines):
+        self.f.writelines([text_type(_str) for _str in lines])
+
+    # Proxy all other methods.
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+
 
 # In Python 3 there is exception FileExistsError. But it is not available
 # in Python 2. For Python 2 fall back to OSError exception.
@@ -168,24 +202,31 @@ base_prefix = getattr( sys, 'real_prefix',
 base_prefix = os.path.abspath(base_prefix)
 is_venv = is_virtualenv = base_prefix != os.path.abspath(sys.prefix)
 
+# Conda environments sometimes have different paths or apply patches to
+# packages that can affect how a hook or package should access resources.
+# Method for determining conda taken from:
+# https://stackoverflow.com/questions/47610844#47610844
+is_conda = os.path.isdir(os.path.join(base_prefix, 'conda-meta'))
 
 # In Python 3.4 module 'imp' is deprecated and there is another way how
 # to obtain magic value.
-if is_py34:
+if is_py3:
     import importlib.util
     BYTECODE_MAGIC = importlib.util.MAGIC_NUMBER
 else:
-    # This fallback should work with Python 2.7 and 3.3.
+    # This fallback should work with Python 2.7.
     import imp
     BYTECODE_MAGIC = imp.get_magic()
 
 
 # List of suffixes for Python C extension modules.
 try:
-    # In Python 3.3+ There is a list
-    from importlib.machinery import EXTENSION_SUFFIXES
+    # In Python 3.4+ There is a list
+    from importlib.machinery import EXTENSION_SUFFIXES, all_suffixes
+    ALL_SUFFIXES = all_suffixes()
 except ImportError:
     import imp
+    ALL_SUFFIXES = [f[0] for f in imp.get_suffixes()]
     EXTENSION_SUFFIXES = [f[0] for f in imp.get_suffixes()
                           if f[2] == imp.C_EXTENSION]
 
@@ -198,31 +239,23 @@ else:
     modname_tkinter = 'tkinter'
 
 
-# On Windows we require pypiwin32 or pywin32-ctypes
+# On Windows we require pywin32-ctypes
 # -> all pyinstaller modules should use win32api from PyInstaller.compat to
 #    ensure that it can work on MSYS2 (which requires pywin32-ctypes)
 if is_win:
     try:
-        from PyInstaller.utils.win32 import winutils
-        try:
-            pywintypes = winutils.import_pywin32_module('pywintypes', _is_venv=is_venv)
-            win32api = winutils.import_pywin32_module('win32api', _is_venv=is_venv)
-        except ImportError:
-            try:
-                from win32ctypes.pywin32 import pywintypes
-                from win32ctypes.pywin32 import win32api
-            except ImportError:
-                raise
+        from win32ctypes.pywin32 import pywintypes  # noqa: F401
+        from win32ctypes.pywin32 import win32api
     except ImportError:
         # This environment variable is set by seutp.py
         # - It's not an error for pywin32 to not be installed at that point
         if not os.environ.get('PYINSTALLER_NO_PYWIN32_FAILURE'):
             raise SystemExit('PyInstaller cannot check for assembly dependencies.\n'
-                             'Please install PyWin32 or pywin32-ctypes.\n\n'
-                             'pip install pypiwin32\n')
+                             'Please install pywin32-ctypes.\n\n'
+                             'pip install pywin32-ctypes\n')
 
 
-def architecture():
+def _architecture():
     """
     Returns the bit depth of the python interpreter's architecture as
     a string ('32bit' or '64bit'). Similar to platform.architecture(),
@@ -240,8 +273,10 @@ def architecture():
     else:
         return platform.architecture()[0]
 
+architecture = _architecture()
+del _architecture
 
-def system():
+def _system():
     # On some Windows installation (Python 2.4) platform.system() is
     # broken and incorrectly returns 'Microsoft' instead of 'Windows'.
     # http://mail.python.org/pipermail/patches/2007-June/022947.html
@@ -250,24 +285,31 @@ def system():
         return 'Windows'
     return syst
 
+system = _system()
+del _system
 
-def machine():
+def _machine():
     """
     Return machine suffix to use in directory name when looking
     for bootloader.
 
     PyInstaller is reported to work even on ARM architecture. For that
-    case functions system() and architecture() are not enough.
-    Path to bootloader has to be composed from system(), architecture()
-    and machine() like:
+    case `system` and `architecture` are not enough.
+    Path to bootloader has to be composed from `system`, `architecture`
+    and `machine` like:
         'Linux-32bit-arm'
     """
     mach = platform.machine()
     if mach.startswith('arm'):
         return 'arm'
+    elif mach.startswith('aarch'):
+        return 'aarch'
     else:
         # Assume x86/x86_64 machine.
         return None
+
+machine = _machine()
+del _machine
 
 
 # Set and get environment variables does not handle unicode strings correctly
@@ -349,6 +391,10 @@ def exec_command(*cmdargs, **kwargs):
         Optional keyword argument specifying the encoding with which to decode
         this command's standard output under Python 3. As this function's return
         value should be ignored, this argument should _never_ be passed.
+    __raise_ENOENT__ : boolean, optional
+        Optional keyword argument to simply raise the exception if the
+        executing the command fails since to the command is not found. This is
+        useful to checking id a command exists.
 
     All remaining keyword arguments are passed as is to the `subprocess.Popen()`
     constructor.
@@ -360,18 +406,38 @@ def exec_command(*cmdargs, **kwargs):
     """
 
     encoding = kwargs.pop('encoding', None)
-    out = subprocess.Popen(cmdargs, stdout=subprocess.PIPE, **kwargs).communicate()[0]
+    raise_ENOENT = kwargs.pop('__raise_ENOENT__', None)
+    try:
+        out = subprocess.Popen(
+            cmdargs, stdout=subprocess.PIPE, **kwargs).communicate()[0]
+    except OSError as e:
+        if raise_ENOENT and e.errno == errno.ENOENT:
+            raise
+        print('--' * 20, file=sys.stderr)
+        print("Error running '%s':" % " ".join(cmdargs), file=sys.stderr)
+        print(e, file=sys.stderr)
+        print('--' * 20, file=sys.stderr)
+        raise ExecCommandFailed("Error: Executing command failed!")
     # Python 3 returns stdout/stderr as a byte array NOT as string.
     # Thus we need to convert that to proper encoding.
 
     if is_py3:
-        if encoding:
-            out = out.decode(encoding)
-        else:
-            # If no encoding is given, assume we're reading filenames from stdout
-            # only because it's the common case.
-            out = os.fsdecode(out)
-
+        try:
+            if encoding:
+                out = out.decode(encoding)
+            else:
+                # If no encoding is given, assume we're reading filenames from
+                # stdout only because it's the common case.
+                out = os.fsdecode(out)
+        except UnicodeDecodeError as e:
+            # The sub-process used a different encoding,
+            # provide more information to ease debugging.
+            print('--' * 20, file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            print('These are the bytes around the offending byte:',
+                  file=sys.stderr)
+            print('--' * 20, file=sys.stderr)
+            raise
     return out
 
 
@@ -495,6 +561,7 @@ def exec_command_all(*cmdargs, **kwargs):
         Ignore this 3-element tuple `(exit_code, stdout, stderr)`. See the
         `exec_command()` function for discussion.
     """
+    encoding = kwargs.pop('encoding', None)
     proc = subprocess.Popen(cmdargs, bufsize=-1,  # Default OS buffer size.
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
     # Waits for subprocess to complete.
@@ -502,16 +569,24 @@ def exec_command_all(*cmdargs, **kwargs):
     # Python 3 returns stdout/stderr as a byte array NOT as string.
     # Thus we need to convert that to proper encoding.
     if is_py3:
-        encoding = kwargs.get('encoding')
-        if encoding:
-            out = out.decode(encoding)
-            err = err.decode(encoding)
-        else:
-            # If no encoding is given, assume we're reading filenames from stdout
-            # only because it's the common case.
-            out = os.fsdecode(out)
-            err = os.fsdecode(err)
-
+        try:
+            if encoding:
+                out = out.decode(encoding)
+                err = err.decode(encoding)
+            else:
+                # If no encoding is given, assume we're reading filenames from
+                # stdout only because it's the common case.
+                out = os.fsdecode(out)
+                err = os.fsdecode(err)
+        except UnicodeDecodeError as e:
+            # The sub-process used a different encoding,
+            # provide more information to ease debugging.
+            print('--' * 20, file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            print('These are the bytes around the offending byte:',
+                  file=sys.stderr)
+            print('--' * 20, file=sys.stderr)
+            raise
 
     return proc.returncode, out, err
 
@@ -525,7 +600,7 @@ def __wrap_python(args, kwargs):
     # It is necessary to run binaries with 'arch' command.
     if is_darwin:
         mapping = {'32bit': '-i386', '64bit': '-x86_64'}
-        py_prefix = ['arch', mapping[architecture()]]
+        py_prefix = ['arch', mapping[architecture]]
         # Since OS X 10.11 the environment variable DYLD_LIBRARY_PATH is no
         # more inherited by child processes, so we proactively propagate
         # the current value using the `-e` option of the `arch` command.
@@ -570,16 +645,6 @@ def exec_python_rc(*args, **kwargs):
     """
     cmdargs, kwargs = __wrap_python(args, kwargs)
     return exec_command_rc(*cmdargs, **kwargs)
-
-
-def exec_python_all(*args, **kwargs):
-    """
-    Wrap running python script in a subprocess.
-
-    Return tuple (exit_code, stdout, stderr) of the invoked command.
-    """
-    cmdargs, kwargs = __wrap_python(args, kwargs)
-    return exec_command_all(*cmdargs, **kwargs)
 
 
 ## Path handling.
@@ -752,6 +817,7 @@ PY3_BASE_MODULES = {
     'collections',
     'copyreg',
     'encodings',
+    'enum',
     'functools',
     'io',
     'heapq',
@@ -767,15 +833,14 @@ PY3_BASE_MODULES = {
     'traceback',  # for startup errors
     'types',
     'weakref',
+    'warnings',
 }
 
-#FIXME: Reduce this pair of nested tests to "if sys.version_info >= (3, 4)".
-if sys.version_info[0] == 3:
-    if sys.version_info[1] >= 4:
-        PY3_BASE_MODULES.update({
-            '_bootlocale',
-            '_collections_abc',
-        })
+if sys.version_info >= (3, 4):
+    PY3_BASE_MODULES.update({
+        '_bootlocale',
+        '_collections_abc',
+    })
 
 # Object types of Pure Python modules in modulegraph dependency graph.
 # Pure Python modules have code object (attribute co_code).
@@ -861,5 +926,28 @@ def check_requirements():
     Fail hard if any requirement is not met.
     """
     # Fail hard if Python does not have minimum required version
-    if sys.version_info < (3, 3) and sys.version_info[:2] != (2, 7):
-        raise SystemExit('PyInstaller requires at least Python 2.7 or 3.3+.')
+    if sys.version_info < (3, 4) and sys.version_info[:2] != (2, 7):
+        raise SystemExit('PyInstaller requires at least Python 2.7 or 3.4+.')
+
+
+if not is_py3:
+    class suppress(object):
+        """Context manager to suppress specified exceptions
+        After the exception is suppressed, execution proceeds with the next
+        statement following the with statement.
+             with suppress(FileNotFoundError):
+                 os.remove(somefile)
+             # Execution still resumes here if the file was already removed
+        """
+
+        def __init__(self, *exceptions):
+            self._exceptions = exceptions
+
+        def __enter__(self):
+            pass
+
+        def __exit__(self, exctype, excinst, exctb):
+            return (exctype is not None and
+                    issubclass(exctype, self._exceptions))
+else:
+    from contextlib import suppress  # noqa: F401

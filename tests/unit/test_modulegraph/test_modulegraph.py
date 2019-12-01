@@ -6,10 +6,10 @@ import imp
 import sys
 import shutil
 import warnings
-from PyInstaller.lib.altgraph import Graph
+from altgraph import Graph
 from PyInstaller.compat import is_win
 import textwrap
-import xml.etree.ElementTree as ET
+from lxml import etree
 import pickle
 
 try:
@@ -467,6 +467,8 @@ class TestNode (unittest.TestCase):
         if '__dict__' in d:
             # New in Python 3.4
             del d['__dict__']
+        if '__slotnames__' in d:
+            del d['__slotnames__']
         self.assertEqual(d, {})
 
     def assertHasExactMethods(self, klass, *methods):
@@ -1077,7 +1079,12 @@ class TestModuleGraph (unittest.TestCase):
         graph.create_xref(out=fp)
 
         data = fp.getvalue()
-        r = ET.fromstring(data)
+        # Don't tolerate any HTML `parsing errors <https://lxml.de/parsing.html#parser-options>`_.
+        parser = etree.HTMLParser(recover=False)
+        tree = etree.parse(StringIO(data), parser)
+        assert tree is not None
+        # Verify no `errors <https://lxml.de/parsing.html#error-log>`_ occurred.
+        assert len(parser.error_log) == 0
 
     def test_itergraphreport(self):
         # XXX: This test is far from optimal, it just ensures

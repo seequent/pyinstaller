@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2013-2017, PyInstaller Development Team.
+# Copyright (c) 2013-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -92,7 +92,7 @@ from xml.dom import Node, minidom
 from xml.dom.minidom import Document, Element
 
 from PyInstaller import compat
-from PyInstaller.compat import architecture, string_types
+from PyInstaller.compat import string_types
 from PyInstaller import log as logging
 from PyInstaller.utils.win32 import winresource
 
@@ -183,9 +183,8 @@ class File(_File):
         e.g. to update the hash if the file has changed.
 
         """
-        fd = open(self.filename, "rb")
-        buf = fd.read()
-        fd.close()
+        with open(self.filename, "rb") as fd:
+            buf = fd.read()
         if hashalg:
             self.hashalg = hashalg.upper()
         self.hash = getattr(hashlib, self.hashalg.lower())(buf).hexdigest()
@@ -912,7 +911,7 @@ class Manifest(object):
             xmlstr = domtree.toprettyxml(indent, newl, encoding)
         else:
             xmlstr = domtree.toprettyxml(indent, newl)
-        xmlstr = xmlstr.decode().strip(os.linesep).replace(
+        xmlstr = xmlstr.decode(encoding).strip(os.linesep).replace(
                 '<?xml version="1.0" encoding="%s"?>' % encoding,
                 '<?xml version="1.0" encoding="%s" standalone="yes"?>' %
                 encoding)
@@ -935,8 +934,9 @@ class Manifest(object):
 
     def update_resources(self, dstpath, names=None, languages=None):
         """ Update or add manifest resource in dll/exe file dstpath """
-        UpdateManifestResourcesFromXML(dstpath, self.toprettyxml(), names,
-                                       languages)
+        UpdateManifestResourcesFromXML(dstpath,
+                                       self.toprettyxml().encode("UTF-8"),
+                                       names, languages)
 
     def writeprettyxml(self, filename_or_file=None, indent="  ", newl=os.linesep,
                        encoding="UTF-8"):
@@ -946,8 +946,8 @@ class Manifest(object):
         if isinstance(filename_or_file, string_types):
             filename_or_file = open(filename_or_file, "wb")
         xmlstr = self.toprettyxml(indent, newl, encoding)
-        filename_or_file.write(xmlstr.encode())
-        filename_or_file.close()
+        with filename_or_file:
+            filename_or_file.write(xmlstr.encode())
 
     def writexml(self, filename_or_file=None, indent="  ", newl=os.linesep,
                  encoding="UTF-8"):
@@ -957,8 +957,8 @@ class Manifest(object):
         if isinstance(filename_or_file, string_types):
             filename_or_file = open(filename_or_file, "wb")
         xmlstr = self.toxml(encoding)
-        filename_or_file.write(xmlstr.encode())
-        filename_or_file.close()
+        with filename_or_file:
+            filename_or_file.write(xmlstr.encode())
 
 
 def ManifestFromResFile(filename, names=None, languages=None):
@@ -1072,8 +1072,7 @@ def create_manifest(filename, manifest, console, uac_admin=False, uac_uiaccess=F
     # only write a new manifest if it is different from the old
     need_new = not os.path.exists(filename)
     if not need_new:
-        with open(filename) as f:
-            old_xml = f.read()
+        old_xml = ManifestFromXMLFile(filename).toprettyxml()
         new_xml = manifest.toprettyxml().replace('\r','')
 
         # this only works if PYTHONHASHSEED is set in environment
@@ -1095,7 +1094,7 @@ def processor_architecture():
     'x86' - 32bit Windows
     'amd64' - 64bit Windows
     """
-    if architecture() == '32bit':
+    if compat.architecture == '32bit':
         return 'x86'
     else:
         return 'amd64'

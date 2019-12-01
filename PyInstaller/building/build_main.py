@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -7,6 +7,7 @@
 # The full license is in the file COPYING.txt, distributed with this software.
 #-----------------------------------------------------------------------------
 
+from __future__ import print_function
 
 """
 Build packages using spec files.
@@ -27,8 +28,9 @@ import sys
 from .. import HOMEPATH, DEFAULT_DISTPATH, DEFAULT_WORKPATH
 from .. import compat
 from .. import log as logging
-from ..utils.misc import absnormpath
-from ..compat import is_py2, is_win, PYDYLIB_NAMES, VALID_MODULE_TYPES
+from ..utils.misc import absnormpath, compile_py_files
+from ..compat import is_py2, is_win, PYDYLIB_NAMES, VALID_MODULE_TYPES, \
+    open_file, text_type, unicode_writer
 from ..depend import bindepend
 from ..depend.analysis import initialize_modgraph
 from .api import PYZ, EXE, COLLECT, MERGE
@@ -54,6 +56,29 @@ rthooks = {}
 
 # place where the loader modules and initialization scripts live
 _init_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'loader')
+
+IMPORT_TYPES = ['top-level', 'conditional', 'delayed', 'delayed, conditional',
+                'optional', 'conditional, optional', 'delayed, optional',
+                'delayed, conditional, optional']
+
+WARNFILE_HEADER = """\
+
+This file lists modules PyInstaller was not able to find. This does not
+necessarily mean this module is required for running you program. Python and
+Python 3rd-party packages include a lot of conditional or optional module. For
+example the module 'ntpath' only exists on Windows, whereas the module
+'posixpath' only exists on Posix systems.
+
+Types if import:
+* top-level: imported at the top-level - look at these first
+* conditional: imported within an if-statement
+* delayed: imported from within a function
+* optional: imported within a try-except-statement
+
+IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
+           yourself tracking down the missing module. Thanks!
+
+"""
 
 
 def _old_api_error(obj_name):
@@ -96,7 +121,7 @@ class Analysis(Target):
             The pure Python modules.
     binaries
             The extensionmodules and their dependencies. The secondary dependecies
-            are filtered. On Windows files from C:\Windows are excluded by default.
+            are filtered. On Windows files from C:\\Windows are excluded by default.
             On Linux/Unix only system libraries from /lib or /usr/lib are excluded.
     datas
             Data-file dependencies. These are data-file that are found to be needed
@@ -115,7 +140,8 @@ class Analysis(Target):
 
     def __init__(self, scripts, pathex=None, binaries=None, datas=None,
                  hiddenimports=None, hookspath=None, excludes=None, runtime_hooks=None,
-                 cipher=None, win_no_prefer_redirects=False, win_private_assemblies=False):
+                 cipher=None, win_no_prefer_redirects=False, win_private_assemblies=False,
+                 noarchive=False):
         """
         scripts
                 A list of scripts specified as file names.
@@ -142,7 +168,9 @@ class Analysis(Target):
         win_private_assemblies
                 If True, changes all bundled Windows SxS Assemblies into Private
                 Assemblies to enforce assembly versions.
-
+        noarchive
+                If True, don't place source files in a archive, but keep them as
+                individual files.
         """
         super(Analysis, self).__init__()
         from ..config import CONF
@@ -192,8 +220,9 @@ class Analysis(Target):
             # Create a Python module which contains the decryption key which will
             # be used at runtime by pyi_crypto.PyiBlockCipher.
             pyi_crypto_key_path = os.path.join(CONF['workpath'], 'pyimod00_crypto_key.py')
-            with open(pyi_crypto_key_path, 'w') as f:
-                f.write('key = %r\n' % cipher.key)
+            with open_file(pyi_crypto_key_path, 'w', encoding='utf-8') as f:
+                f.write(text_type('# -*- coding: utf-8 -*-\n'
+                                  'key = %r\n' % cipher.key))
             logger.info('Adding dependencies on pyi_crypto.py module')
             self.hiddenimports.append(pyz_crypto.get_crypto_hiddenimports())
 
@@ -209,6 +238,7 @@ class Analysis(Target):
         self.win_no_prefer_redirects = win_no_prefer_redirects
         self.win_private_assemblies = win_private_assemblies
         self._python_version = sys.version
+        self.noarchive = noarchive
 
         self.__postinit__()
 
@@ -222,7 +252,7 @@ class Analysis(Target):
         if datas:
             logger.info("Appending 'datas' from .spec")
             for name, pth in format_binaries_and_datas(datas, workingdir=spec_dir):
-                self.binaries.append((name, pth, 'DATA'))
+                self.datas.append((name, pth, 'DATA'))
 
     _GUTS = (# input parameters
             ('inputs', _check_guts_eq),  # parameter `scripts`
@@ -549,6 +579,26 @@ class Analysis(Target):
             self.binding_redirects[:] = list(set(self.binding_redirects))
             logger.info("Found binding redirects: \n%s", self.binding_redirects)
 
+        # Place Python source in data files for the noarchive case.
+        if self.noarchive:
+            # Create a new TOC of ``(dest path for .pyc, source for .py, type)``.
+            new_toc = TOC()
+            for name, path, typecode in self.pure:
+                assert typecode == 'PYMODULE'
+                # Transform a python module name into a file name.
+                name = name.replace('.', os.sep)
+                # Special case: modules have an implied filename to add.
+                if os.path.splitext(os.path.basename(path))[0] == '__init__':
+                    name += os.sep + '__init__'
+                # Append the extension for the compiled result.
+                name += '.py' + ('o' if sys.flags.optimize else 'c')
+                new_toc.append((name, path, typecode))
+            # Put the result of byte-compiling this TOC in datas. Mark all entries as data.
+            for name, path, typecode in compile_py_files(new_toc, CONF['workpath']):
+                self.datas.append((name, path, 'DATA'))
+            # Store no source in the archive.
+            self.pure = TOC()
+
         # Write warnings about missing modules.
         self._write_warnings()
         # Write debug information about hte graph
@@ -559,40 +609,42 @@ class Analysis(Target):
         Write warnings about missing modules. Get them from the graph
         and use the graph to figure out who tried to import them.
         """
-        # TODO: previously we could say whether an import was top-level,
-        # deferred (in a def'd function) or conditional (in an if stmt).
-        # That information is not available from ModuleGraph at this time.
-        # When that info is available change this code to write one line for
-        # each importer-name, with type of import for that importer
-        # "no module named foo conditional/deferred/toplevel importy by bar"
+        def dependency_description(name, depInfo):
+            if not depInfo or depInfo == 'direct':
+                imptype = 0
+            else:
+                imptype = (depInfo.conditional
+                           + 2 * depInfo.function
+                           + 4 * depInfo.tryexcept)
+            return '%s (%s)' % (name, IMPORT_TYPES[imptype])
+
         from ..config import CONF
         miss_toc = self.graph.make_missing_toc()
-        if len(miss_toc) : # there are some missing modules
-            wf = open(CONF['warnfile'], 'w')
-            for (n, p, status) in miss_toc :
-                importer_names = self.graph.importer_names(n)
-                wf.write( status
-                          + ' module named '
-                          + n
-                          + ' - imported by '
-                          + ', '.join(importer_names)
-                          + '\n'
-                          )
-            wf.close()
-            logger.info("Warnings written to %s", CONF['warnfile'])
+        with open_file(CONF['warnfile'], 'w', encoding='utf-8') as wf:
+            wf_unicode = unicode_writer(wf)
+            wf_unicode.write(WARNFILE_HEADER)
+            for (n, p, status) in miss_toc:
+                importers = self.graph.get_importers(n)
+                print(status, 'module named', n, '- imported by',
+                      ', '.join(dependency_description(name, data)
+                                for name, data in importers),
+                      file=wf_unicode)
+        logger.info("Warnings written to %s", CONF['warnfile'])
 
     def _write_graph_debug(self):
         """Write a xref (in html) and with `--log-level DEBUG` a dot-drawing
         of the graph.
         """
         from ..config import CONF
-        with open(CONF['xref-file'], 'w') as fh:
-            self.graph.create_xref(fh)
+        with open_file(CONF['xref-file'], 'w', encoding='utf-8') as fh:
+            self.graph.create_xref(unicode_writer(fh))
             logger.info("Graph cross-reference written to %s", CONF['xref-file'])
         if logger.getEffectiveLevel() > logging.DEBUG:
             return
-        with open(CONF['dot-file'], 'w') as fh:
-            self.graph.graphreport(fh)
+        # The `DOT language's <https://www.graphviz.org/doc/info/lang.html>`_
+        # default character encoding (see the end of the linked page) is UTF-8.
+        with open_file(CONF['dot-file'], 'w', encoding='utf-8') as fh:
+            self.graph.graphreport(unicode_writer(fh))
             logger.info("Graph drawing written to %s", CONF['dot-file'])
 
 
@@ -670,7 +722,7 @@ def build(spec, distpath, workpath, clean_build):
     else:
         workpath = os.path.join(workpath, CONF['specnm'])
 
-    CONF['warnfile'] = os.path.join(workpath, 'warn%s.txt' % CONF['specnm'])
+    CONF['warnfile'] = os.path.join(workpath, 'warn-%s.txt' % CONF['specnm'])
     CONF['dot-file'] = os.path.join(workpath, 'graph-%s.dot' % CONF['specnm'])
     CONF['xref-file'] = os.path.join(workpath, 'xref-%s.html' % CONF['specnm'])
 
@@ -731,11 +783,12 @@ def build(spec, distpath, workpath, clean_build):
     from ..config import CONF
     CONF['workpath'] = workpath
 
-    # Executing the specfile.
-    with open(spec, 'r') as f:
-        text = f.read()
-    exec(text, spec_namespace)
-
+    # Execute the specfile. Read it as a binary file...
+    with open(spec, 'rU' if is_py2 else 'rb') as f:
+        # ... then let Python determine the encoding, since ``compile`` accepts
+        # byte strings.
+        code = compile(f.read(), spec, 'exec')
+    exec(code, spec_namespace)
 
 def __add_options(parser):
     parser.add_argument("--distpath", metavar="DIR",

@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 # -----------------------------------------------------------------------------
-# Copyright (c) 2014-2017, PyInstaller Development Team.
+# Copyright (c) 2014-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -19,7 +19,8 @@ import sys
 import re
 import sysconfig
 from waflib.Configure import conf
-from waflib import Logs, Utils
+from waflib import Logs, Utils, Options
+from waflib.Build import BuildContext, InstallContext
 
 # The following two variables are used by the target "waf dist"
 VERSION = 'nodist'
@@ -44,23 +45,25 @@ variants = {
 # map waf's DEST_OS to these values.
 DESTOS_TO_SYSTEM = {
     'linux': 'Linux',
+    'freebsd': 'FreeBSD',
     'win32': 'Windows',
     'darwin': 'Darwin',
-    'sunos': platform.system(), ## FIXME: inhibits cross-compile
+    'sunos': platform.system(),  ## FIXME: inhibits cross-compile
     'hpux': 'HP-UX',
     'aix': 'AIX',
-    }
+}
 
 # Map from platform.system() to waf's DEST_OS
 SYSTEM_TO_BUILDOS = {
     'Linux': 'linux',
+    'FreeBSD': 'freebsd',
     'Windows': 'win32',
     'Darwin': 'darwin',
     'Solaris': 'sunos',
     'SunOS': 'sunos',
     'HP-UX': 'hpux',
     'AIX': 'aix',
-    }
+}
 
 # waf's name of the system we are building on
 BUILD_OS = SYSTEM_TO_BUILDOS.get(platform.system(), platform.system())
@@ -74,13 +77,15 @@ def machine():
 
     Machine name in bootloader is necessary only for non-x86 architecture.
     """
-    mach = None  # Assume x86/x86_64 machine.
-    # Different name for arm is necessary.
-    if platform.machine().startswith('arm'):
-        mach = 'arm'
-    elif platform.machine().startswith('aarch'):
-        mach = 'aarch'
-    return mach
+    # IMPORTANT: Keep this in line with PyInstaller.compat.machine()
+    mach = platform.machine()
+    if mach.startswith('arm'):
+        return 'arm'
+    elif mach.startswith('aarch'):
+        return 'aarch'
+    else:
+        # Assume x86/x86_64 machine.
+        return None
 
 
 def assoc_programm(ctx, name):
@@ -215,7 +220,6 @@ def check_sizeof_pointer(ctx):
             return 0;
         }''' % (type, expected)
         return ctx.check_cc(fragment=fragment, execute=False, mandatory=False)
-
 
     ctx.start_msg("Checking size of pointer")
     for size in (4, 8):
@@ -392,6 +396,7 @@ def set_arch_flags(ctx):
 
 
 def configure(ctx):
+    ctx.msg('Python Version', sys.version.replace(os.linesep, ''))
     # For MSVC the target arch must already been set when the compiler is
     # searched.
     if ctx.options.target_arch == '32bit':
@@ -400,6 +405,7 @@ def configure(ctx):
         ctx.env['MSVC_TARGETS'] = ['x64']
 
     ### C compiler
+
     # Allow to use Clang if preferred.
     if ctx.options.clang:
         ctx.load('clang')
@@ -510,11 +516,13 @@ def configure(ctx):
 
             # TODO What other platforms support _FORTIFY_SOURCE macro? OS X?
             # TODO OS X's CLang appears to support this macro as well. See:
-            # http://permalink.gmane.org/gmane.comp.compilers.clang.devel/2442
+            # https://marc.info/?l=cfe-dev&m=122032133830183
 
             # For security, enable the _FORTIFY_SOURCE macro detecting buffer
             # overflows in various string and memory manipulation functions.
-            if ctx.env.CC_NAME == 'gcc':
+            if ctx.options.debug:
+                ctx.env.append_value('CFLAGS', '-U_FORTIFY_SOURCE')
+            elif ctx.env.CC_NAME == 'gcc':
                 # Undefine this macro if already defined by default to avoid
                 # "macro redefinition" errors.
                 ctx.env.append_value('CFLAGS', '-U_FORTIFY_SOURCE')
@@ -606,9 +614,27 @@ def configure(ctx):
 
     ### Functions
 
-    # unsetenv not available on AIX, maybe others.
-    ctx.check_cc(function_name='unsetenv', header_name="stdlib.h", mandatory=False)
-    ctx.check_cc(function_name='mkdtemp', header_name="stdlib.h", mandatory=False)
+    # The old ``function_name`` parameter to ``check_cc`` is no longer
+    # supported. This code is based on old waf source at
+    # https://gitlab.com/ita1024/waf/commit/62fe305d04ed37b1be1a3327a74b2fee6c458634#255b2344e5268e6a34bedd2f8c4680798344fec7.
+    SNIP_FUNCTION = '''
+    #include <stdlib.h>
+
+    int main(int argc, char **argv) {
+        void (*p)();
+
+        (void)argc; (void)argv;
+        p=(void(*)())(%s);
+        return !p;
+    }
+'''
+    # OS support for these functions varies.
+    for function_name in ('unsetenv', 'mkdtemp'):
+        ctx.check(
+            fragment=SNIP_FUNCTION % function_name,
+            mandatory=False,
+            define_name=ctx.have_define(function_name),
+            msg='Checking for function %s' % function_name)
 
     ### CFLAGS
 
@@ -617,6 +643,10 @@ def configure(ctx):
             # Use Unicode entry point wmain/wWinMain and wchar_t WinAPI
             ctx.env.append_value('CFLAGS', '-DUNICODE')
             ctx.env.append_value('CFLAGS', '-D_UNICODE')
+            # set XP target as minimal target OS ver. when using Windows w/MSVC
+            # https://blogs.msdn.microsoft.com/vcblog/2012/10/08/windows-xp-targeting-with-c-in-visual-studio-2012/
+            ctx.env.append_value('LINKFLAGS', '/SUBSYSTEM:CONSOLE,%s' % (
+                '5.01' if ctx.env.PYI_ARCH == '32bit' else '5.02'))
         else:
             # Use Visual C++ compatible alignment
             ctx.env.append_value('CFLAGS', '-mms-bitfields')
@@ -643,11 +673,19 @@ def configure(ctx):
         ctx.setenv(name, baseenv)  # Inherit from `baseenv`.
         ctx.env.append_value('DEFINES', 'WINDOWED')
 
-        if ctx.env.DEST_OS == 'win32' and ctx.env.CC_NAME != 'msvc':
-            # For MinGW disable console window on Windows - MinGW option
-            # TODO Is it necessary to have -mwindows for C and LINK flags?
-            ctx.env.append_value('LINKFLAGS', '-mwindows')
-            ctx.env.append_value('CFLAGS', '-mwindows')
+        if ctx.env.DEST_OS == 'win32':
+            if ctx.env.CC_NAME != 'msvc':
+                # For MinGW disable console window on Windows - MinGW option
+                # TODO Is it necessary to have -mwindows for C and LINK flags?
+                ctx.env.append_value('LINKFLAGS', '-mwindows')
+                ctx.env.append_value('CFLAGS', '-mwindows')
+            else:
+                _link_flags = ctx.env._get_list_value_for_modification('LINKFLAGS')
+                _subsystem = [x for x in _link_flags if x.startswith('/SUBSYSTEM:')]
+                for parameter in _subsystem:
+                    _link_flags.remove(parameter)
+                ctx.env.append_value('LINKFLAGS', '/SUBSYSTEM:WINDOWS,%s' % (
+                    '5.01' if ctx.env.PYI_ARCH == '32bit' else '5.02'))
         elif ctx.env.DEST_OS == 'darwin':
             # To support catching AppleEvents and running as ordinary OSX GUI
             # app, we have to link against the Carbon framework.
@@ -728,7 +766,7 @@ def build(ctx):
         # here. The decision if a lib is required for a specific platform is
         # made in the configure phase.
         libs = ['DL', 'M', 'Z',  # 'z' - zlib, 'm' - math,
-                'THR'] # may be used on FreBSD
+                'THR']  # may be used on FreBSD
         staticlibs = []
         if ctx.env.DEST_OS == 'aix':
             # link statically with zlib
@@ -748,7 +786,6 @@ def build(ctx):
             features=features)
 
 
-from waflib.Build import BuildContext
 class make_all(BuildContext):
     """
     Do build and install in one step.
@@ -756,7 +793,6 @@ class make_all(BuildContext):
     cmd = 'make_all'
 
     def execute_build(ctx):
-        from waflib import Options, Scripting
         Options.commands = ['build_debug', 'build_release']
         # On Windows and Mac OS X we also need console/windowed bootloaders.
         # On other platforms they make no sense.
@@ -767,6 +803,7 @@ class make_all(BuildContext):
         if ctx.env.DEST_OS in ('win32', 'darwin'):
             Options.commands += ['install_debugw', 'install_releasew']
 
+
 def all(ctx):
     """
     Do configure, build and install in one step.
@@ -774,18 +811,14 @@ def all(ctx):
     # `all` is run prior to `configure`, thus it does not get a build context.
     # Thus another command `make_all` is required which gets the build
     # context and can make decisions based on the outcome of `configure`.
-    from waflib import Options, Scripting
     Options.commands = ['distclean', 'configure', 'make_all']
 
 
 # Set up building several variants of bootloader.
-from waflib.Build import BuildContext, InstallContext
-
 for x in variants:
     class BootloaderContext(BuildContext):
         cmd = 'build' + '_' + x
         variant = x
-
 
     class BootloaderInstallContext(InstallContext):
         cmd = 'install' + '_' + x

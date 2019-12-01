@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -20,12 +20,13 @@ import io
 import marshal
 import os
 import re
+import struct
 import zipfile
 
 from ..lib.modulegraph import util, modulegraph
 
 from .. import compat
-from ..compat import (is_darwin, is_unix, is_py2, is_py34, is_freebsd,
+from ..compat import (is_darwin, is_unix, is_freebsd, is_py2, is_py37,
                       BYTECODE_MAGIC, PY3_BASE_MODULES,
                       exec_python_rc)
 from .dylib import include_library
@@ -41,17 +42,6 @@ def create_py3_base_library(libzip_filename, graph):
     modules is necessary to have on PYTHONPATH for initializing libpython3
     in order to run the frozen executable with Python 3.
     """
-    # TODO Replace this function with something better or something from standard Python library.
-    # Helper functions.
-    def _write_long(f, x):
-        """
-        Write a 32-bit int to a file in little-endian order.
-        """
-        f.write(bytes([x & 0xff,
-                       (x >> 8) & 0xff,
-                       (x >> 16) & 0xff,
-                       (x >> 24) & 0xff]))
-
     # Construct regular expression for matching modules that should be bundled
     # into base_library.zip.
     # Excluded are plain 'modules' or 'submodules.ANY_NAME'.
@@ -88,10 +78,15 @@ def create_py3_base_library(libzip_filename, graph):
                         with io.BytesIO() as fc:
                             # Prepare all data in byte stream file-like object.
                             fc.write(BYTECODE_MAGIC)
-                            _write_long(fc, timestamp)
-                            _write_long(fc, size)
+                            if is_py37:
+                                # Additional bitfield according to PEP 552
+                                # zero means timestamp based
+                                fc.write(struct.pack('<I', 0))
+                            fc.write(struct.pack('<II', timestamp, size))
                             marshal.dump(mod.code, fc)
-                            zf.writestr(new_name, fc.getvalue())
+                            # Use a ZipInfo to set timestamp for deterministic build
+                            info = zipfile.ZipInfo(new_name)
+                            zf.writestr(info, fc.getvalue())
 
     except Exception as e:
         logger.error('base_library.zip could not be created!')
@@ -162,6 +157,7 @@ def __scan_code_instruction_for_ctypes(instructions):
         try:
             instruction = next(instructions)
             expected_ops = ('LOAD_GLOBAL', 'LOAD_NAME')
+            load_method = ('LOAD_ATTR', 'LOAD_METHOD')
 
             if not instruction or instruction.opname not in expected_ops:
                 continue
@@ -177,9 +173,8 @@ def __scan_code_instruction_for_ctypes(instructions):
                 #
                 # In this case "strip" the `ctypes` by advancing and expecting
                 # `LOAD_ATTR` next.
-                expected_ops = ('LOAD_ATTR',)
                 instruction = next(instructions)
-                if instruction.opname not in expected_ops:
+                if instruction.opname not in load_method:
                     continue
                 name = instruction.argval
 
@@ -205,7 +200,7 @@ def __scan_code_instruction_for_ctypes(instructions):
                 #     LOAD_ATTR     1 (LoadLibrary)
                 #     LOAD_CONST    1 ('library.so')
                 instruction = next(instructions)
-                if instruction.opname == 'LOAD_ATTR':
+                if instruction.opname in load_method:
                     if instruction.argval == "LoadLibrary":
                         # Second type, needs to fetch one more instruction
                         yield _libFromConst()
@@ -223,7 +218,7 @@ def __scan_code_instruction_for_ctypes(instructions):
                 #     LOAD_ATTR     1 (find_library)
                 #     LOAD_CONST    1 ('gs')
                 instruction = next(instructions)
-                if instruction.opname == 'LOAD_ATTR':
+                if instruction.opname in load_method:
                     if instruction.argval == "find_library":
                         libname = _libFromConst()
                         if libname:
@@ -366,7 +361,7 @@ def load_ldconfig_cache():
         # an informative line and might contain localized characters.
         # Example of first line with local cs_CZ.UTF-8:
         #$ /sbin/ldconfig -p
-        #V keši „/etc/ld.so.cache“ nalezeno knihoven: 2799
+        #V keši „/etc/ld.so.cache“ nalezeno knihoven: 2799
         #      libzvbi.so.0 (libc6,x86-64) => /lib64/libzvbi.so.0
         #      libzvbi-chains.so.0 (libc6,x86-64) => /lib64/libzvbi-chains.so.0
         text = compat.exec_command(ldconfig, '-p')
