@@ -40,6 +40,7 @@ class Qt5LibraryInfo:
         if 'version' not in self.__dict__:
             # Get library path information from Qt. See QLibraryInfo_.
             json_str = exec_statement("""
+                import os
                 import sys
 
                 # exec_statement only captures stdout. If there are
@@ -50,10 +51,13 @@ class Qt5LibraryInfo:
 
                 import json
                 try:
-                    from %s.QtCore import QLibraryInfo, QCoreApplication
+                    from %s.QtCore import QLibraryInfo, QCoreApplication, QResource
                 except:
                     print('False')
                 else:
+                    if "QT_BUILD_RESOURCE" in os.environ:
+                        QResource.registerResource(os.environ["QT_BUILD_RESOURCE"])
+                        
                     # QLibraryInfo isn't always valid until a QCoreApplication is
                     # instantiated.
                     app = QCoreApplication(sys.argv)
