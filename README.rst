@@ -6,36 +6,11 @@ package. The user can run the packaged app without installing a Python
 interpreter or any modules.
 
 
-.. image:: https://img.shields.io/travis/pyinstaller/pyinstaller/v3.3.svg?label=Linux
-   :target: https://travis-ci.org/pyinstaller/pyinstaller/
-   :alt: Travis CI test status (Linux)
-
-.. image:: https://img.shields.io/travis/pyinstaller/pyinstaller-osx-tests/master.svg?label=OS%20X
-   :target: https://travis-ci.org/pyinstaller/pyinstaller-osx-tests
-   :alt: Travis CI test status (OS X)
-
-.. image:: https://img.shields.io/appveyor/ci/matysek/pyinstaller/v3.3.svg?label=Windows
-   :target: https://ci.appveyor.com/project/matysek/pyinstaller/branch/v3.3
-   :alt: AppVeyor CI test status (Windows)
-
-.. image:: https://landscape.io/github/pyinstaller/pyinstaller/master/landscape.svg?
-   :target: https://landscape.io/github/pyinstaller/pyinstaller/master
-   :alt: Code health
-
-.. image:: https://img.shields.io/pypi/v/PyInstaller.svg
-   :target: https://pypi.python.org/pypi/PyInstaller
-
-.. image:: https://img.shields.io/badge/docs-v3.3-blue.svg
-   :target: https://pyinstaller.readthedocs.io/en/v3.3/
-   :alt: Manual
-
-.. image:: https://img.shields.io/badge/changes-v3.3-blue.svg
-   :target: https://pyinstaller.readthedocs.io/en/v3.3/CHANGES.html
-   :alt: Changelog
-
-.. image:: https://img.shields.io/badge/IRC-pyinstalller-blue.svg
-   :target: http://webchat.freenode.net/?channels=%23pyinstaller&uio=d4
-   :alt: IRC
+**Help keeping PyInstaller alive:**
+Maintaining PyInstaller is a huge amount of work.
+PyInstaller development can only continue
+if users and companies provide sustainable funding. See
+http://www.pyinstaller.org/funding.html for how to support PyInstaller.
 
 
 :Documentation: https://pyinstaller.readthedocs.io/
@@ -53,16 +28,19 @@ Python interpreter! -- and puts them with your script in a single folder, or
 optionally in a single executable file.
 
 
-PyInstaller is tested against Windows, Mac OS X, and Linux. However, it is not
-a cross-compiler: to make a Windows app you run PyInstaller in Windows; to make
-a Linux app you run it in Linux, etc. PyInstaller has been used successfully
+PyInstaller is tested against Windows, Mac OS X, and GNU/Linux.
+However, it is not a cross-compiler:
+to make a Windows app you run PyInstaller in Windows; to make
+a GNU/Linux app you run it in GNU/Linux, etc.
+PyInstaller has been used successfully
 with AIX, Solaris, and FreeBSD, but is not tested against them.
 
 
 Main Advantages
 ---------------
 
-- Works out-of-the-box with any Python version 2.7 / 3.3-3.5.
+- Works out-of-the-box with any Python version 2.7 / 3.4-3.7
+  (although Python 3.4 is not longer tested by the test-suite).
 - Fully multi-platform, and uses the OS support to load the dynamic libraries,
   thus ensuring full compatibility.
 - Correctly bundles the major Python packages such as numpy, PyQt4, PyQt5,
@@ -88,14 +66,15 @@ Requirements and Tested Platforms
 
 - Python: 
 
- - 2.7 or 3.3-3.5
+ - 2.7 or 3.4-3.7
+   (although Python 3.4 is not longer tested by the test-suite)
  - PyCrypto_ 2.4+ (only if using bytecode encryption)
 
 - Windows (32bit/64bit):
 
  - Windows XP or newer.
     
-- Linux (32bit/64bit)
+- GNU/Linux (32bit/64bit)
 
  - ldd: Console application to print the shared libraries required
    by each program or shared library. This typically can be found in
@@ -143,7 +122,7 @@ enhancements on these are welcome.
    linked Python libraries.
  - ldd
 
-- PowerPC Linux (Debian)
+- PowerPC GNU/Linux (Debian)
 
 
 Before using any contributed platform, you need to build the PyInstaller
@@ -160,7 +139,23 @@ Then install PyInstaller::
 or simply use it directly from the source (pyinstaller.py).
 
 
+Support
+---------------------
+
+See http://www.pyinstaller.org/support.html for how to find help as well as
+for commercial support.
+
+
+Funding
+---------------------
+
+Maintaining PyInstaller is a huge amount of work.
+PyInstaller development can only continue
+if users and companies provide sustainable funding. See
+http://www.pyinstaller.org/funding.html for how to support PyInstaller.
+
+
 
 .. _PyCrypto: https://www.dlitz.net/software/pycrypto/
-.. _`manual`: https://pyinstaller.readthedocs.io/en/v3.3/
+.. _`manual`: https://pyinstaller.readthedocs.io/en/v3.5/
 

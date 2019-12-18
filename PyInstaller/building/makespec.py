@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -19,12 +19,18 @@ from distutils.version import LooseVersion
 
 from .. import HOMEPATH, DEFAULT_SPECPATH
 from .. import log as logging
-from ..compat import expand_path, is_win, is_cygwin, is_darwin
+from ..compat import expand_path, is_darwin, is_win, open_file, text_type
 from .templates import onefiletmplt, onedirtmplt, cipher_absent_template, \
     cipher_init_template, bundleexetmplt, bundletmplt
 
 logger = logging.getLogger(__name__)
 add_command_sep = os.pathsep
+
+# This list gives valid choices for the ``--debug`` command-line option, except
+# for the ``all`` choice.
+DEBUG_ARGUMENT_CHOICES = ['imports', 'bootloader', 'noarchive']
+# This is the ``all`` choice.
+DEBUG_ALL_CHOICE = ['all']
 
 
 def quote_win_filepath(path):
@@ -162,26 +168,71 @@ def __add_options(parser):
                    help='The key used to encrypt Python bytecode.')
 
     g = parser.add_argument_group('How to generate')
-    g.add_argument("-d", "--debug", action="store_true", default=False,
-                   help=("Tell the bootloader to issue progress messages "
-                         "while initializing and starting the bundled app. "
-                         "Used to diagnose problems with missing imports."))
+    g.add_argument("-d", "--debug",
+                   # If this option is not specified, then its default value is
+                   # an empty list (no debug options selected).
+                   default=[],
+                   # Note that ``nargs`` is omitted. This produces a single item
+                   # not stored in a list, as opposed to list containing one
+                   # item, per `nargs <https://docs.python.org/3/library/argparse.html#nargs>`_.
+                   nargs=None,
+                   # The options specified must come from this list.
+                   choices=DEBUG_ALL_CHOICE + DEBUG_ARGUMENT_CHOICES,
+                   # Append choice, rather than storing them (which would
+                   # overwrite any previous selections).
+                   action='append',
+                   # Allow newlines in the help text; see the
+                   # ``_SmartFormatter`` in ``__main__.py``.
+                   help=("R|Provide assistance with debugging a frozen\n"
+                         "application. This argument may be provided multiple\n"
+                         "times to select several of the following options.\n"
+                         "\n"
+                         "- all: All three of the following options.\n"
+                         "\n"
+                         "- imports: specify the -v option to the underlying\n"
+                         "  Python interpreter, causing it to print a message\n"
+                         "  each time a module is initialized, showing the\n"
+                         "  place (filename or built-in module) from which it\n"
+                         "  is loaded. See\n"
+                         "  https://docs.python.org/3/using/cmdline.html#id4.\n"
+                         "\n"
+                         "- bootloader: tell the bootloader to issue progress\n"
+                         "  messages while initializing and starting the\n"
+                         "  bundled app. Used to diagnose problems with\n"
+                         "  missing imports.\n"
+                         "\n"
+                         "- noarchive: instead of storing all frozen Python\n"
+                         "  source files as an archive inside the resulting\n"
+                         "  executable, store them as files in the resulting\n"
+                         "  output directory.\n"
+                         "\n"))
     g.add_argument("-s", "--strip", action="store_true",
                    help="Apply a symbol-table strip to the executable and shared libs "
                         "(not recommended for Windows)")
     g.add_argument("--noupx", action="store_true", default=False,
                    help="Do not use UPX even if it is available "
                         "(works differently between Windows and *nix)")
+    g.add_argument("--upx-exclude", dest="upx_exclude", metavar="FILE",
+                   action="append",
+                   help="Prevent a binary from being compressed when using "
+                        "upx. This is typically used if upx corrupts certain "
+                        "binaries during compression. "
+                        "FILE is the filename of the binary without path. "
+                        "This option can be used multiple times.")
 
     g = parser.add_argument_group('Windows and Mac OS X specific options')
     g.add_argument("-c", "--console", "--nowindowed", dest="console",
                    action="store_true", default=True,
-                   help="Open a console window for standard i/o (default)")
+                   help="Open a console window for standard i/o (default). "
+                        "On Windows this option will have no effect if the "
+                        "first script is a '.pyw' file.")
     g.add_argument("-w", "--windowed", "--noconsole", dest="console",
                    action="store_false",
                    help="Windows and Mac OS X: do not provide a console window "
                         "for standard i/o. "
                         "On Mac OS X this also triggers building an OS X .app bundle. "
+                        "On Windows this option will be set if the first "
+                        "script is a '.pyw' file. "
                         "This option is ignored in *NIX systems.")
     g.add_argument("-i", "--icon", dest="icon_file",
                    metavar="<FILE.ico or FILE.exe,ID or FILE.icns>",
@@ -250,11 +301,20 @@ def __add_options(parser):
                         "The ``_MEIxxxxxx``-folder will be created here. "
                         "Please use this option only if you know what you "
                         "are doing.")
+    g.add_argument("--bootloader-ignore-signals", action="store_true",
+                   default=False,
+                   help=("Tell the bootloader to ignore signals rather "
+                         "than forwarding them to the child process. "
+                         "Useful in situations where e.g. a supervisor "
+                         "process signals both the bootloader and child "
+                         "(e.g. via a process group) to avoid signalling "
+                         "the child twice."))
 
 
 def main(scripts, name=None, onefile=None,
-         console=True, debug=False, strip=False, noupx=False, runtime_tmpdir=None,
-         pathex=None, version_file=None, specpath=None,
+         console=True, debug=None, strip=False, noupx=False, upx_exclude=None,
+         runtime_tmpdir=None, pathex=None, version_file=None, specpath=None,
+         bootloader_ignore_signals=False,
          datas=None, binaries=None, icon_file=None, manifest=None, resources=None, bundle_identifier=None,
          hiddenimports=None, hookspath=None, key=None, runtime_hooks=None,
          excludes=None, uac_admin=False, uac_uiaccess=False,
@@ -319,6 +379,11 @@ def main(scripts, name=None, onefile=None,
         exe_options = "%s, resources=%s" % (exe_options, repr(resources))
 
     hiddenimports = hiddenimports or []
+    upx_exclude = upx_exclude or []
+
+    # If file extension of the first script is '.pyw', force --windowed option.
+    if is_win and os.path.splitext(scripts[0])[-1] == '.pyw':
+        console = False
 
     # If script paths are relative, make them relative to the directory containing .spec file.
     scripts = [make_path_spec_relative(x, specpath) for x in scripts]
@@ -343,6 +408,13 @@ def main(scripts, name=None, onefile=None,
     else:
         cipher_init = cipher_absent_template
 
+    # Translate the default of ``debug=None`` to an empty list.
+    if debug is None:
+        debug = []
+    # Translate the ``all`` option.
+    if DEBUG_ALL_CHOICE[0] in debug:
+        debug = DEBUG_ARGUMENT_CHOICES
+
     d = {
         'scripts': scripts,
         'pathex': pathex,
@@ -350,9 +422,13 @@ def main(scripts, name=None, onefile=None,
         'datas': datas,
         'hiddenimports': hiddenimports,
         'name': name,
-        'debug': debug,
+        'noarchive': 'noarchive' in debug,
+        'options': [('v', None, 'OPTION')] if 'imports' in debug else [],
+        'debug_bootloader': 'bootloader' in debug,
+        'bootloader_ignore_signals': bootloader_ignore_signals,
         'strip': strip,
         'upx': not noupx,
+        'upx_exclude': upx_exclude,
         'runtime_tmpdir': runtime_tmpdir,
         'exe_options': exe_options,
         'cipher_init': cipher_init,
@@ -375,17 +451,16 @@ def main(scripts, name=None, onefile=None,
 
     # Write down .spec file to filesystem.
     specfnm = os.path.join(specpath, name + '.spec')
-    specfile = open(specfnm, 'w')
-    if onefile:
-        specfile.write(onefiletmplt % d)
-        # For OSX create .app bundle.
-        if is_darwin and not console:
-            specfile.write(bundleexetmplt % d)
-    else:
-        specfile.write(onedirtmplt % d)
-        # For OSX create .app bundle.
-        if is_darwin and not console:
-            specfile.write(bundletmplt % d)
-    specfile.close()
+    with open_file(specfnm, 'w', encoding='utf-8') as specfile:
+        if onefile:
+            specfile.write(text_type(onefiletmplt % d))
+            # For OSX create .app bundle.
+            if is_darwin and not console:
+                specfile.write(text_type(bundleexetmplt % d))
+        else:
+            specfile.write(text_type(onedirtmplt % d))
+            # For OSX create .app bundle.
+            if is_darwin and not console:
+                specfile.write(text_type(bundletmplt % d))
 
     return specfnm

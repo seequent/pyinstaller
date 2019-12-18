@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -8,7 +8,6 @@
 #-----------------------------------------------------------------------------
 
 
-import pytest
 import types
 
 from PyInstaller import HOMEPATH

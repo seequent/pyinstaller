@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -12,7 +12,7 @@
 Templates to generate .spec files.
 """
 
-onefiletmplt = """# -*- mode: python -*-
+onefiletmplt = """# -*- mode: python ; coding: utf-8 -*-
 %(cipher_init)s
 
 a = Analysis(%(scripts)s,
@@ -25,7 +25,8 @@ a = Analysis(%(scripts)s,
              excludes=%(excludes)s,
              win_no_prefer_redirects=%(win_no_prefer_redirects)s,
              win_private_assemblies=%(win_private_assemblies)s,
-             cipher=block_cipher)
+             cipher=block_cipher,
+             noarchive=%(noarchive)s)
 pyz = PYZ(a.pure, a.zipped_data,
              cipher=block_cipher)
 exe = EXE(pyz,
@@ -33,15 +34,18 @@ exe = EXE(pyz,
           a.binaries,
           a.zipfiles,
           a.datas,
+          %(options)s,
           name='%(name)s',
-          debug=%(debug)s,
+          debug=%(debug_bootloader)s,
+          bootloader_ignore_signals=%(bootloader_ignore_signals)s,
           strip=%(strip)s,
           upx=%(upx)s,
+          upx_exclude=%(upx_exclude)s,
           runtime_tmpdir=%(runtime_tmpdir)r,
           console=%(console)s %(exe_options)s)
 """
 
-onedirtmplt = """# -*- mode: python -*-
+onedirtmplt = """# -*- mode: python ; coding: utf-8 -*-
 %(cipher_init)s
 
 a = Analysis(%(scripts)s,
@@ -54,14 +58,17 @@ a = Analysis(%(scripts)s,
              excludes=%(excludes)s,
              win_no_prefer_redirects=%(win_no_prefer_redirects)s,
              win_private_assemblies=%(win_private_assemblies)s,
-             cipher=block_cipher)
+             cipher=block_cipher,
+             noarchive=%(noarchive)s)
 pyz = PYZ(a.pure, a.zipped_data,
              cipher=block_cipher)
 exe = EXE(pyz,
           a.scripts,
+          %(options)s,
           exclude_binaries=True,
           name='%(name)s',
-          debug=%(debug)s,
+          debug=%(debug_bootloader)s,
+          bootloader_ignore_signals=%(bootloader_ignore_signals)s,
           strip=%(strip)s,
           upx=%(upx)s,
           console=%(console)s %(exe_options)s)
@@ -71,6 +78,7 @@ coll = COLLECT(exe,
                a.datas,
                strip=%(strip)s,
                upx=%(upx)s,
+               upx_exclude=%(upx_exclude)s,
                name='%(name)s')
 """
 

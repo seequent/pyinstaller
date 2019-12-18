@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2005-2017, PyInstaller Development Team.
+# Copyright (c) 2005-2019, PyInstaller Development Team.
 #
 # Distributed under the terms of the GNU General Public License with exception
 # for distributing bootloader.
@@ -32,6 +32,15 @@ import shutil
 import py
 import psutil # Manages subprocess timeout.
 
+
+# Set a handler for the root-logger to inhibit 'basicConfig()' (called in
+# PyInstaller.log) is setting up a stream handler writing to stderr. This
+# avoids log messages to be written (and captured) twice: once on stderr and
+# once by pytests's caplog.
+import logging
+logging.getLogger().addHandler(logging.NullHandler())
+
+
 # Local imports
 # -------------
 # Expand sys.path with PyInstaller source.
@@ -42,9 +51,16 @@ from PyInstaller import configure, config
 from PyInstaller import __main__ as pyi_main
 from PyInstaller.utils.cliutils import archive_viewer
 from PyInstaller.compat import is_darwin, is_win, is_py2, safe_repr, \
-  architecture, is_linux
+    architecture, is_linux, suppress, text_read_mode
 from PyInstaller.depend.analysis import initialize_modgraph
 from PyInstaller.utils.win32 import winutils
+from PyInstaller.utils.hooks.qt import pyqt5_library_info
+
+# Monkeypatch the psutil subprocess on Python 2
+if is_py2:
+    import subprocess32
+    psutil.subprocess = subprocess32
+    subprocess.TimeoutExpired = psutil.TimeoutExpired
 
 # Globals
 # =======
@@ -61,6 +77,8 @@ _SPEC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'specs')
 # Timeout for running the executable. If executable does not exit in this time
 # then it is interpreted as test failure.
 _EXE_TIMEOUT = 30  # In sec.
+# Number of retries we should attempt if the executable times out.
+_MAX_RETRIES = 2
 
 # Code
 # ====
@@ -239,12 +257,11 @@ class AppBuilder(object):
         them have to be run.
 
         :param args: CLI options to pass to the created executable.
-        :param runtime: Time in miliseconds how long to keep the executable running.
+        :param runtime: Time in seconds how long to keep the executable running.
 
         :return: Exit code of the executable.
         """
         __tracebackhide__ = True
-        # TODO implement runtime - kill the app (Ctrl+C) when time times out
         exes = self._find_executables(name)
         # Empty list means that PyInstaller probably failed to create any executable.
         assert exes != [], 'No executable file was found.'
@@ -341,34 +358,57 @@ class AppBuilder(object):
                 prog_cwd = prog_cwd.encode('mbcs')
 
         args = [prog_name] + args
-        # Run executable. stderr is redirected to stdout.
-        print('RUNNING: ', safe_repr(exe_path), ", args: ", safe_repr(args))
-
         # Using sys.stdout/sys.stderr for subprocess fixes printing messages in
         # Windows command prompt. Py.test is then able to collect stdout/sterr
         # messages and display them if a test fails.
+        for _ in range(_MAX_RETRIES):
+            retcode = self.__run_executable(args, exe_path, prog_env,
+                                            prog_cwd, runtime)
+            if retcode != 1:  # retcode == 1 means a timeout
+                break
+        return retcode
 
-        process = psutil.Popen(args, executable=exe_path, stdout=sys.stdout,
-                               stderr=sys.stderr, env=prog_env, cwd=prog_cwd)
+
+    def __run_executable(self, args, exe_path, prog_env, prog_cwd, runtime):
+        process = psutil.Popen(args, executable=exe_path,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE,
+                               env=prog_env, cwd=prog_cwd)
+
+        def _msg(*text):
+            print('[' + str(process.pid) + '] ', *text)
+
+        # Run executable. stderr is redirected to stdout.
+        _msg('RUNNING: ', safe_repr(exe_path), ', args: ', safe_repr(args))
         # 'psutil' allows to use timeout in waiting for a subprocess.
         # If not timeout was specified then it is 'None' - no timeout, just waiting.
         # Runtime is useful mostly for interactive tests.
         try:
             timeout = runtime if runtime else _EXE_TIMEOUT
-            retcode = process.wait(timeout=timeout)
-        except psutil.TimeoutExpired:
+            stdout, stderr = process.communicate(timeout=timeout)
+            retcode = process.returncode
+        except (psutil.TimeoutExpired, subprocess.TimeoutExpired):
             if runtime:
                 # When 'runtime' is set then expired timeout is a good sing
                 # that the executable was running successfully for a specified time.
                 # TODO Is there a better way return success than 'retcode = 0'?
                 retcode = 0
             else:
-                # Exe is still running and it is not an interactive test. Fail the test.
+                # Exe is running and it is not interactive. Fail the test.
                 retcode = 1
+                _msg('TIMED OUT!')
             # Kill the subprocess and its child processes.
-            for p in process.children(recursive=True):
-                p.kill()
-            process.kill()
+            for p in list(process.children(recursive=True)) + [process]:
+                with suppress(psutil.NoSuchProcess):
+                    p.kill()
+            stdout, stderr = process.communicate()
+
+        if is_py2:
+            sys.stdout.write(stdout)
+            sys.stderr.write(stderr)
+        else:
+            sys.stdout.buffer.write(stdout)
+            sys.stderr.buffer.write(stderr)
 
         return retcode
 
@@ -380,12 +420,13 @@ class AppBuilder(object):
 
         Return True if build succeded False otherwise.
         """
-        default_args = ['--debug', '--noupx',
+        default_args = ['--debug=bootloader', '--noupx',
                 '--specpath', self._specdir,
                 '--distpath', self._distdir,
                 '--workpath', self._builddir,
-                '--path', _MODULES_DIR]
-        default_args.extend(['--debug', '--log-level=DEBUG'])
+                '--path', _MODULES_DIR,
+                '--log-level=DEBUG'
+                ]
 
         # Choose bundle mode.
         if self._mode == 'onedir':
@@ -416,7 +457,7 @@ class AppBuilder(object):
         print('EXECUTING MATCHING:', toc_log)
         fname_list = archive_viewer.get_archive_content(exe)
         fname_list = [fn for fn in fname_list]
-        with open(toc_log, 'rU') as f:
+        with open(toc_log, text_read_mode) as f:
             pattern_list = eval(f.read())
         # Alphabetical order of patterns.
         pattern_list.sort()
@@ -470,15 +511,18 @@ def pyi_builder(tmpdir, monkeypatch, request, pyi_modgraph):
     # The value is same as the original value.
     monkeypatch.setattr('PyInstaller.config.CONF', {'pathex': []})
 
-    def del_temp_dir():
+    yield AppBuilder(tmp, request.param, pyi_modgraph)
+
+    if is_darwin or is_linux:
         if request.node.rep_setup.passed:
             if request.node.rep_call.passed:
                 if os.path.exists(tmp):
                     shutil.rmtree(tmp)
-
-    if is_darwin or is_linux:
-        request.addfinalizer(del_temp_dir)
-    return AppBuilder(tmp, request.param, pyi_modgraph)
+    # Clear any PyQt5 state.
+    try:
+        del pyqt5_library_info.version
+    except AttributeError:
+        pass
 
 
 # Fixture for .spec based tests.
@@ -515,7 +559,7 @@ def compiled_dylib(tmpdir):
         if is_win:
             tmp_data_dir = tmp_data_dir.join('ctypes_dylib.dll')
             # For Mingw-x64 we must pass '-m32' to build 32-bit binaries
-            march = '-m32' if architecture() == '32bit' else '-m64'
+            march = '-m32' if architecture == '32bit' else '-m64'
             ret = subprocess.call('gcc -shared ' + march + ' ctypes_dylib.c -o ctypes_dylib.dll', shell=True)
             if ret != 0:
                 # Find path to cl.exe file.
@@ -528,7 +572,7 @@ def compiled_dylib(tmpdir):
         elif is_darwin:
             tmp_data_dir = tmp_data_dir.join('ctypes_dylib.dylib')
             # On Mac OS X we need to detect architecture - 32 bit or 64 bit.
-            arch = 'i386' if architecture() == '32bit' else 'x86_64'
+            arch = 'i386' if architecture == '32bit' else 'x86_64'
             cmd = ('gcc -arch ' + arch + ' -Wall -dynamiclib '
                 'ctypes_dylib.c -o ctypes_dylib.dylib -headerpad_max_install_names')
             ret = subprocess.call(cmd, shell=True)
